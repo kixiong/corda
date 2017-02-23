@@ -115,8 +115,7 @@ class InMemoryNetworkMapService(services: ServiceHubInternal) : AbstractNetworkM
  * subscriber clean up and is simpler to persist than the previous implementation based on a set of missing messages acks.
  */
 @ThreadSafe
-abstract class AbstractNetworkMapService
-(services: ServiceHubInternal) : NetworkMapService, AbstractNodeService(services) {
+abstract class AbstractNetworkMapService(services: ServiceHubInternal) : NetworkMapService, AbstractNodeService(services) {
     protected abstract val registeredNodes: MutableMap<Party, NodeRegistrationInfo>
 
     // Map from subscriber address, to most recently acknowledged update map version.
@@ -272,21 +271,29 @@ abstract class AbstractNetworkMapService
         val node = change.node
 
         var changed: Boolean = false
-        // Update the current value atomically, so that if multiple updates come
-        // in on different threads, there is no risk of a race condition while checking
-        // sequence numbers.
-        val registrationInfo = registeredNodes.compute(node.legalIdentity, { mapKey: Party, existing: NodeRegistrationInfo? ->
-            changed = existing == null || existing.reg.serial < change.serial
-            if (changed) {
-                when (change.type) {
-                    AddOrRemove.ADD -> NodeRegistrationInfo(change, mapVersionIncrementAndGet())
-                    AddOrRemove.REMOVE -> NodeRegistrationInfo(change, mapVersionIncrementAndGet())
-                    else -> throw NodeMapError.UnknownChangeType()
+
+        // Reject the request if the node is on a different major version from us. This way the network map service can
+        // ensure the entire network is on the same major version.
+        val registrationInfo = if (change.node.version.major == services.myInfo.version.major) {
+            // Update the current value atomically, so that if multiple updates come
+            // in on different threads, there is no risk of a race condition while checking
+            // sequence numbers.
+            registeredNodes.compute(node.legalIdentity) { mapKey: Party, existing: NodeRegistrationInfo? ->
+                changed = existing == null || existing.reg.serial < change.serial
+                if (changed) {
+                    when (change.type) {
+                        AddOrRemove.ADD -> NodeRegistrationInfo(change, mapVersionIncrementAndGet())
+                        AddOrRemove.REMOVE -> NodeRegistrationInfo(change, mapVersionIncrementAndGet())
+                        else -> throw NodeMapError.UnknownChangeType()
+                    }
+                } else {
+                    existing
                 }
-            } else {
-                existing
             }
-        })
+        } else {
+            null
+        }
+
         if (changed) {
             notifySubscribers(req.wireReg, registrationInfo!!.mapVersion)
 
